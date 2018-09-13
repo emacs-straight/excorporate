@@ -1,6 +1,6 @@
 ;;; excorporate.el --- Exchange integration           -*- lexical-binding: t -*-
 
-;; Copyright (C) 2014-2016 Free Software Foundation, Inc.
+;; Copyright (C) 2014-2018 Free Software Foundation, Inc.
 
 ;; Author: Thomas Fitzsimmons <fitzsim@fitzsim.org>
 ;; Maintainer: Thomas Fitzsimmons <fitzsim@fitzsim.org>
@@ -8,7 +8,7 @@
 ;; Version: 0.7.7
 ;; Keywords: calendar
 ;; Homepage: https://www.fitzsim.org/blog/
-;; Package-Requires: ((emacs "24.1") (fsm "0.2") (soap-client "3.1.4") (url-http-ntlm "2.0.3"))
+;; Package-Requires: ((emacs "24.1") (fsm "0.2") (soap-client "3.1.4") (url-http-ntlm "2.0.3") (nadvice "0.2"))
 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -101,6 +101,10 @@
 
 ;; Fabio Leimgruber <fabio.leimgruber@web.de> tested NTLM
 ;; authentication against a challenging server configuration.
+
+;; Stefan Monnier <monnier@iro.umontreal.ca> wrote a variant of
+;; nadvice.el for GNU ELPA so that Excorporate could continue
+;; supporting Emacs versions 24.1, 24.2 and 24.3.
 
 ;;; Code:
 
@@ -641,6 +645,103 @@ PATH is an ordered list of node names."
       (setq values (assoc path-element values)))
     (cdr values)))
 
+(defun exco-calendar-item-get-details (identifier item-identifier process-item)
+  "Query server for details about ITEM-IDENTIFIER.
+IDENTIFIER is the connection identifier.  Call PROCESS-ITEM with
+argument ICALENDAR-TEXT."
+  (exco-operate identifier
+		"GetItem"
+		`(((ItemShape
+		    (BaseShape . "IdOnly")
+		    (IncludeMimeContent . t))
+		   (ItemIds ,item-identifier))
+		  nil nil nil nil nil nil)
+		(lambda (_identifier response)
+		  (let* ((mime-path '(ResponseMessages
+				      GetItemResponseMessage
+				      Items
+				      CalendarItem
+				      MimeContent))
+			 (character-set-path (append mime-path '(CharacterSet)))
+			 (coding-system (intern (downcase (exco-extract-value
+							   character-set-path
+							   response)))))
+		    (unless (member coding-system coding-system-list)
+		      (error "Unrecognized coding system: %s"
+			     (exco-extract-value character-set-path response)))
+		    (funcall process-item (decode-coding-string
+					   (base64-decode-string
+					    (cdr (exco-extract-value
+						  mime-path response)))
+					   coding-system))))))
+
+(defmacro exco--calendar-item-dolist (item items &rest forms)
+  "Iterate through ITEMS.
+On each iteration, ITEM is set, and FORMS are run."
+  `(dolist (,item ,items)
+     (let* ((subject (cdr (assoc 'Subject ,item)))
+	    (start (cdr (assoc 'Start ,item)))
+	    (start-internal (apply #'encode-time
+				   (soap-decode-date-time
+				    start 'dateTime)))
+	    (end (cdr (assoc 'End ,item)))
+	    (end-internal (apply #'encode-time
+				 (soap-decode-date-time
+				  end 'dateTime)))
+	    (location (cdr (assoc 'Location ,item)))
+	    (to-invitees (cdr (assoc 'DisplayTo ,item)))
+	    (main-invitees (when to-invitees
+			     (mapcar 'org-trim
+				     (split-string to-invitees ";"))))
+	    (cc-invitees (cdr (assoc 'DisplayCc ,item)))
+	    (optional-invitees (when cc-invitees
+				 (mapcar 'org-trim
+					 (split-string cc-invitees ";"))))
+	    (item-identifier (assoc 'ItemId ,item)))
+       ,@forms)))
+
+(defun exco-calendar-item-with-details-iterate (identifier
+						response
+						callback
+						finalize)
+  "Iterate through calendar items in RESPONSE, calling CALLBACK on each.
+IDENTIFIER identifies the connection.
+
+CALLBACK takes the following arguments: FINALIZE, which is the
+FINALIZE argument to this function wrapped in a countdown,
+SUBJECT, a string, the subject of the meeting, START, the start
+date and time in Emacs internal representation, END, the start
+date and time in Emacs internal representation, LOCATION, the
+location of the meeting, MAIN-INVITEES, a list of strings
+representing required participants, OPTIONAL-INVITEES, a list of
+strings representing optional participants, DETAILS is the
+meeting request message body, and ICALENDAR-TEXT, the iCalendar
+text representing the meeting series.
+
+CALLBACK must arrange for FINALIZE to be called after its main
+processing is done."
+  (let* ((items (exco-extract-value '(ResponseMessages
+				      FindItemResponseMessage
+				      RootFolder
+				      Items)
+				    response))
+	 (countdown (length items))
+	 (finalizer
+	  (lambda (&rest arguments)
+	    (setq countdown (1- countdown))
+	    (when (equal countdown 0)
+	      (apply finalize arguments)))))
+    (if (equal countdown 0)
+	(funcall finalize)
+      (exco--calendar-item-dolist
+       calendar-item items
+       (exco-calendar-item-get-details
+	identifier item-identifier
+	(lambda (icalendar-text)
+	  (funcall callback finalizer subject start-internal end-internal
+		   location main-invitees optional-invitees
+		   icalendar-text)))))))
+
 (defun exco-calendar-item-iterate (response callback)
   "Iterate through calendar items in RESPONSE, calling CALLBACK on each.
 Returns a list of results from callback.  CALLBACK takes arguments:
@@ -651,32 +752,17 @@ LOCATION, the location of the meeting.
 MAIN-INVITEES, a list of strings representing required participants.
 OPTIONAL-INVITEES, a list of strings representing optional participants."
   (let ((result-list '()))
-    (dolist (calendar-item (exco-extract-value '(ResponseMessages
-						 FindItemResponseMessage
-						 RootFolder
-						 Items)
-					       response))
-      (let* ((subject (cdr (assoc 'Subject calendar-item)))
-	     (start (cdr (assoc 'Start calendar-item)))
-	     (start-internal (apply #'encode-time
-				    (soap-decode-date-time
-				     start 'dateTime)))
-	     (end (cdr (assoc 'End calendar-item)))
-	     (end-internal (apply #'encode-time
-				  (soap-decode-date-time
-				   end 'dateTime)))
-	     (location (cdr (assoc 'Location calendar-item)))
-	     (to-invitees (cdr (assoc 'DisplayTo calendar-item)))
-	     (main-invitees (when to-invitees
-			      (mapcar 'org-trim
-				      (split-string to-invitees ";"))))
-	     (cc-invitees (cdr (assoc 'DisplayCc calendar-item)))
-	     (optional-invitees (when cc-invitees
-				  (mapcar 'org-trim
-					  (split-string cc-invitees ";")))))
-	(push (funcall callback subject start-internal end-internal
-		       location main-invitees optional-invitees)
-	      result-list)))
+    (exco--calendar-item-dolist
+     calendar-item (exco-extract-value '(ResponseMessages
+					 FindItemResponseMessage
+					 RootFolder
+					 Items)
+				       response)
+     ;; Silence byte compiler unused warning.
+     item-identifier
+     (push (funcall callback subject start-internal end-internal
+		    location main-invitees optional-invitees)
+	   result-list))
     (nreverse result-list)))
 
 ;; Date-time utility functions.
@@ -743,23 +829,49 @@ arguments, IDENTIFIER and the server's response."
 (defun exco-connection-iterate (initialize-function
 				per-connection-function
 				per-connection-callback
-				finalize-function)
+				finalize-function
+				&optional callback-will-call-finalize)
   "Iterate Excorporate connections.
-Call INITIALIZE-FUNCTION once before iterating.
-Call PER-CONNECTION-FUNCTION for each connection.
-Pass PER-CONNECTION-CALLBACK to PER-CONNECTION-FUNCTION.
-Call FINALIZE-FUNCTION after all operations have responded."
+Call INITIALIZE-FUNCTION once before iterating.  It takes no
+arguments.
+
+Call PER-CONNECTION-FUNCTION once for each server connection.  It
+is run synchronously.  It accepts two arguments, IDENTIFIER, the
+current server connection, and CALLBACK, which is a wrapped
+version of PER-CONNECTION-CALLBACK.
+
+PER-CONNECTION-CALLBACK takes a variable number of arguments,
+depending on which callback it is.  If
+CALLBACK-WILL-CALL-FINALIZE is non-nil, it takes a final
+FINALIZE-FUNCTION argument, which is a countdown-wrapped
+finalizer function that PER-CONNECTION-CALLBACK should call (or
+arrange to be called asynchronously) each time it is invoked.
+
+If CALLBACK-WILL-CALL-FINALIZE is non-nil, this function will not
+call FINALIZE-FUNCTION itself.  Instead it will wrap
+FINALIZE-FUNCTION into a function that can be called once per
+connection, then pass the wrapped finalizer to the callback as an
+argument.  CALLBACK-WILL-CALL-FINALIZE must be set if the
+callback needs to make a recursive asynchronous call."
   (exco--ensure-connection)
   (funcall initialize-function)
-  (let ((responses 0)
-	(connection-count (length exco--connection-identifiers)))
+  (let* ((countdown (length exco--connection-identifiers))
+	 (wrapped-finalizer
+	  (lambda (&rest arguments)
+	    (setq countdown (1- countdown))
+	    (when (equal countdown 0)
+	      (apply finalize-function arguments))))
+	 (wrapped-callback
+	  (lambda (&rest arguments)
+	    (apply per-connection-callback
+		   (append arguments
+			   (when callback-will-call-finalize
+			     (list wrapped-finalizer))))
+	    (unless callback-will-call-finalize
+	      (funcall wrapped-finalizer)))))
     (dolist (identifier exco--connection-identifiers)
       (funcall per-connection-function identifier
-	       (lambda (&rest arguments)
-		 (setq responses (1+ responses))
-		 (apply per-connection-callback arguments)
-		 (when (equal responses connection-count)
-		   (funcall finalize-function)))))))
+	       wrapped-callback))))
 
 ;; User-visible functions and variables.
 (defgroup excorporate nil
