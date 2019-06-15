@@ -1,6 +1,6 @@
 ;;; excorporate-diary.el --- Diary integration        -*- lexical-binding: t -*-
 
-;; Copyright (C) 2018 Free Software Foundation, Inc.
+;; Copyright (C) 2018-2019 Free Software Foundation, Inc.
 
 ;; Author: Thomas Fitzsimmons <fitzsim@fitzsim.org>
 ;; Keywords: calendar
@@ -60,7 +60,9 @@ If omitted, NONMARKING defaults to nil and FILE defaults to
 (defun exco-diary-icalendar--add-diary-entry-around (original &rest arguments)
   "Prevent whitespace workaround from selecting diary buffer.
 Also prevent `diary-make-entry' from putting the diary file
-where (other-buffer (current-buffer)) will return it."
+where (other-buffer (current-buffer)) will return it.  ORIGINAL
+and ARGUMENTS are the original function and arguments
+respectively."
   (cl-letf (((symbol-function #'find-file)
 	     (symbol-function #'find-file-noselect))
 	    ;; This override suppresses diary-make-entry's window
@@ -109,6 +111,18 @@ initialize for today's date, nil otherwise."
 	  ;; connnection-callback loop.
 	  (basic-save-buffer-1))))))
 
+;; Literal percent signs (%) are not supported in a diary entry since
+;; they're interpreted as format strings by `diary-sexp-entry', so
+;; encode them during entry insertion, then unescape them during
+;; display.  This is needed so that, e.g., encoded meeting URLs that
+;; contain literal percent signs (%) work with `browse-url'.
+(defun exco-diary--fix-percent-signs ()
+  "Replace percent-sign placeholders with percent signs."
+  (goto-char (point-min))
+  (let ((inhibit-read-only t))
+    (while (re-search-forward "<EXCO_PERCENT_SIGN>" nil t)
+      (replace-match "%"))))
+
 (defun exco-diary-insert-meeting (finalize
 				  subject start _end _location
 				  _main-invitees _optional-invitees
@@ -138,6 +152,33 @@ Call FINALIZE after the meeting has been inserted."
 		   excorporate-diary-transient-file)))
       (with-temp-buffer
 	(insert icalendar-text)
+
+	;; FIXME: Maybe some users of multiple calendars will want to
+	;; know the source calendar's name for each diary entry.
+	;; There is no great way to achieve that right now, but one
+	;; idea is to add X-WR-CALNAME support to
+	;; icalendar-import-buffer, replace the
+	;; exco-diary-insert-meeting argument to
+	;; exco-calendar-item-with-details-iterate with:
+	;;
+	;; (lambda (&rest arguments)
+	;;  (apply #'exco-diary-insert-meeting identifier arguments))
+	;;
+	;; and uncomment the following code.
+	;;
+	;; (goto-char (point-min))
+	;; (while (re-search-forward
+	;;	"^SUMMARY\\([^:]*\\):\\(.*\\(\n[ 	].*\\)*\\)" nil t)
+	;;   (insert (format "\nX-WR-CALNAME: (%s)" identifier)))
+
+	;; Escape literal percent signs (%).  Use less-than sign (<)
+	;; and greater-than sign (>) which are forbidden URL
+	;; characters, so that in the plain text diary file,
+	;; percent-encoded URLs become completely invalid rather than
+	;; slightly wrong.
+	(goto-char (point-min))
+	(while (re-search-forward "%" nil t)
+	  (replace-match "<EXCO_PERCENT_SIGN>"))
 	(icalendar-import-buffer file t))))
   (funcall finalize))
 
@@ -221,7 +262,8 @@ ARGUMENTS are the arguments to `diary-view-entries'."
 	  (let ((include-string (concat diary-include-string " \"" file "\"")))
 	    (if (string-match "omit-trailing-space"
 			      (documentation 'diary-make-entry))
-		(diary-make-entry include-string nil nil t t)
+		(with-no-warnings
+		  (diary-make-entry include-string nil nil t t))
 	      (exco-diary-diary-make-entry include-string)))
 	  (save-buffer)))))
   (advice-add #'diary :around #'exco-diary-diary-around)
@@ -229,6 +271,13 @@ ARGUMENTS are the arguments to `diary-view-entries'."
 	      #'exco-diary-diary-view-entries-override)
   (add-hook 'diary-list-entries-hook #'diary-sort-entries)
   (add-hook 'diary-list-entries-hook #'diary-include-other-diary-files)
+  (add-hook 'diary-fancy-display-mode-hook #'exco-diary--fix-percent-signs)
+  (unless (eq diary-display-function 'diary-fancy-display)
+    (warn (format
+	   (concat "Excorporate diary support needs diary-fancy-display"
+		   " but diary-display-function is currently %S; overriding")
+	   diary-display-function))
+    (customize-set-variable 'diary-display-function 'diary-fancy-display))
   (appt-activate 1)
   (message "Excorporate diary support enabled."))
 
@@ -237,6 +286,7 @@ ARGUMENTS are the arguments to `diary-view-entries'."
   (interactive)
   (advice-remove #'diary #'exco-diary-diary-around)
   (advice-remove #'diary-view-entries #'exco-diary-diary-view-entries-override)
+  (remove-hook 'diary-fancy-display-mode-hook #'exco-diary--fix-percent-signs)
   (with-current-buffer (find-file-noselect diary-file)
     (dolist (file (list excorporate-diary-transient-file
 			excorporate-diary-today-file))
