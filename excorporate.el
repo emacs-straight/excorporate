@@ -1,14 +1,14 @@
 ;;; excorporate.el --- Exchange Web Services (EWS) integration -*- lexical-binding: t -*-
 
-;; Copyright (C) 2014-2019 Free Software Foundation, Inc.
+;; Copyright (C) 2014-2020 Free Software Foundation, Inc.
 
 ;; Author: Thomas Fitzsimmons <fitzsim@fitzsim.org>
 ;; Maintainer: Thomas Fitzsimmons <fitzsim@fitzsim.org>
 ;; Created: 2014-09-19
-;; Version: 0.8.3
+;; Version: 0.9.1
 ;; Keywords: calendar
 ;; Homepage: https://www.fitzsim.org/blog/
-;; Package-Requires: ((emacs "24.1") (fsm "0.2.1") (soap-client "3.1.5") (url-http-ntlm "2.0.4") (nadvice "0.3"))
+;; Package-Requires: ((emacs "24.1") (fsm "0.2.1") (soap-client "3.2.0") (url-http-ntlm "2.0.4") (nadvice "0.3"))
 
 ;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -136,6 +136,9 @@ state machine represents a service connection.")
 
 (defvar exco--connection-identifiers nil
   "An ordered list of connection identifiers.")
+
+(defvar exco--server-timeout 5
+  "The timeout in seconds to wait for a synchronous server response.")
 
 (defun exco--parse-xml-in-current-buffer ()
   "Decode and parse the XML contents of the current buffer."
@@ -560,20 +563,26 @@ the FSM should transition to on success."
   (list state-data nil))
 
 (define-state exco--fsm :retrieving-data
-  (_fsm state-data event _callback)
+  (_fsm state-data event fsm-result-callback)
   (let* ((identifier (plist-get state-data :identifier))
 	 (wsdl (plist-get state-data :service-wsdl))
 	 (name (pop event))
 	 (arguments (pop event))
 	 (callback (pop event)))
-    (apply #'soap-invoke-async
-	   (lambda (response)
-	     (funcall callback identifier response))
-	   nil
-	   wsdl
-	   "ExchangeServicePort"
-	   name
-	   arguments))
+    (if callback
+	;; exco-operate.
+	(apply #'soap-invoke-async
+	       (lambda (response)
+		 (funcall callback identifier response))
+	       nil
+	       wsdl
+	       "ExchangeServicePort"
+	       name
+	       arguments)
+      ;; exco-operate-synchronously.
+      (funcall
+       fsm-result-callback
+       (apply #'soap-invoke wsdl "ExchangeServicePort" name arguments))))
   (list :retrieving-data state-data nil))
 
 (defun exco--ensure-connection ()
@@ -631,9 +640,19 @@ use the `cdr' of the pair as the service URL."
 IDENTIFIER is the connection identifier.  Execute operation NAME
 with ARGUMENTS then call CALLBACK with two arguments, IDENTIFIER
 and the server's response."
+  (when (null callback) (error "CALLBACK cannot be nil"))
   (exco--with-fsm identifier
     (fsm-send fsm (list name arguments callback)))
   nil)
+
+(defun exco-operate-synchronously (identifier name arguments)
+  "Execute a service operation synchronously.
+IDENTIFIER is the connection identifier.  Execute operation NAME
+with ARGUMENTS then call CALLBACK with two arguments, IDENTIFIER
+and the server's response."
+  (exco--with-fsm identifier
+    (with-timeout (exco--server-timeout (error "Timed out waiting for server"))
+      (fsm-call fsm (list name arguments)))))
 
 (defun exco-server-version (identifier)
   "Return the server version for connection IDENTIFIER, as a string.
@@ -658,6 +677,154 @@ PATH is an ordered list of node names."
     (dolist (path-element path)
       (setq values (assoc path-element values)))
     (cdr values)))
+
+(defun exco--create-attendee-structure (attendees required)
+  "Convert a list of email addresses to an Attendees structure or nil.
+ATTENDEES is a list of strings, attendee email addresses.
+REQUIRED is t if the structure should represent required
+attendees and nil for optional attendees.
+Return a structure, or nil, suitable for splicing into
+`exco-operate` parameters with ,@."
+  (when attendees
+    (let ((attendee-list '()))
+      (dolist (address attendees)
+	(push `(Attendee (Mailbox (EmailAddress . ,address))) attendee-list))
+      (list (cons (if required 'RequiredAttendees 'OptionalAttendees)
+		  (nreverse attendee-list))))))
+
+(defun exco-operation-arity-nils (identifier operation)
+  "Return a list of nil arguments for OPERATION.
+IDENTIFIER is the connection for which to look up OPERATION."
+  (let* ((wsdl (exco--with-fsm identifier
+                 (plist-get (fsm-get-state-data fsm) :service-wsdl)))
+         (arity (soap-operation-arity wsdl "ExchangeServicePort" operation)))
+    (make-list arity nil)))
+
+(defun exco-calendar-item-meeting-create (identifier
+					  subject body start end location
+					  main-invitees optional-invitees
+					  callback)
+  "Create a meeting calendar item.
+IDENTIFIER is the connection identifier.
+SUBJECT is a string, the subject of the appointment.
+BODY is a string, the message text of the appointment.
+START is the start date and time in Emacs internal representation.
+END is the end date and time in Emacs internal representation.
+LOCATION is a string representing the location of the meeting.
+MAIN-INVITEES is a list of strings representing required
+participants.
+OPTIONAL-INVITEES is a list of strings representing optional
+participants
+CALLBACK is a callback function called with two arguments,
+IDENTIFIER, the connection identifier for the responding
+connection, and RESPONSE, the server's response to the meeting
+creation."
+  (exco-operate
+   identifier
+   "CreateItem"
+   `(((SendMeetingInvitations . "SendToAllAndSaveCopy")
+      (Items
+       (CalendarItem
+	(Subject . ,subject)
+	(Body (BodyType . "Text") ,body)
+        (Start . ,(exco-format-date-time start))
+        (End . ,(exco-format-date-time end))
+        (Location . ,location)
+	,@(exco--create-attendee-structure main-invitees t)
+	,@(exco--create-attendee-structure optional-invitees nil))))
+     ;; Empty arguments.
+     ,@(cdr (exco-operation-arity-nils identifier "CreateItem")))
+   callback))
+
+(defun exco-calendar-item-meeting-reply (identifier
+					 item-identifier message acceptance
+					 callback)
+  "Reply to a meeting request.
+IDENTIFIER is the connection identifier.  ITEM-IDENTIFIER is the
+meeting identifier.  MESSAGE is the body of the reply message
+that will be sent to attendees, or nil to omit the message.
+ACCEPTANCE is a symbol representing the type of reply, one of
+`accept', `tentatively-accect' or `decline'.  CALLBACK is a
+callback function called with two arguments, IDENTIFIER, the
+connection identifier for the responding connection, and
+RESPONSE, the server's response to the meeting cancellation."
+  (let ((acceptance-symbol (cl-ecase acceptance
+			     (accept 'AcceptItem)
+			     (tentatively-accept 'TentativelyAcceptItem)
+			     (decline 'DeclineItem))))
+    (exco-operate
+     identifier
+     "CreateItem"
+     `(((MessageDisposition . "SendAndSaveCopy")
+	(Items
+	 (,acceptance-symbol
+	  (Sensitivity . "Private")
+	  (ReferenceItemId ,@(cdr item-identifier))
+	  ,@(when message (list `(Body (BodyType . "Text") ,message))))))
+       ;; Empty arguments.
+       ,@(cdr (exco-operation-arity-nils identifier "CreateItem")))
+     callback)))
+
+(defun exco-calendar-item-meeting-cancel (identifier
+					  item-identifier message callback)
+  "Cancel a meeting.
+IDENTIFIER is the connection identifier.  ITEM-IDENTIFIER is the
+meeting identifier.  MESSAGE is the body of the cancellation
+message that will be sent to attendees.  CALLBACK is a callback
+function called with two arguments, IDENTIFIER, the connection
+identifier for the responding connection, and RESPONSE, the
+server's response to the meeting cancellation."
+  (exco-operate
+   identifier
+   "CreateItem"
+   `(((MessageDisposition . "SendAndSaveCopy")
+      (Items
+       (CancelCalendarItem
+	(ReferenceItemId ,@(cdr item-identifier))
+	(NewBodyContent (BodyType . "Text") ,message))))
+     ;; Empty arguments.
+     ,@(cdr (exco-operation-arity-nils identifier "CreateItem")))
+   callback))
+
+(defun exco-calendar-item-appointment-create (identifier
+					      subject body start end callback)
+  "Create an appointment calendar item.
+IDENTIFIER is the connection identifier.
+SUBJECT is a string, the subject of the appointment.
+BODY is a string, the message text of the appointment.
+START is the start date and time in Emacs internal representation.
+END is the end date and time in Emacs internal representation.
+CALLBACK is a callback function called with two arguments,
+IDENTIFIER, the connection identifier for the responding
+connection, and RESPONSE, the server's response to the
+appointment creation."
+  (exco-operate identifier
+		"CreateItem"
+		`(((SendMeetingInvitations . "SendToNone")
+		   (Items
+		    (CalendarItem
+                     (Subject . ,subject)
+		     (Body (BodyType . "Text") ,body)
+                     (Start . ,(exco-format-date-time start))
+                     (End . ,(exco-format-date-time end)))))
+		  nil nil nil nil)
+		callback))
+
+(defun exco-calendar-item-appointment-delete (identifier
+					      item-identifier callback)
+  "Delete an appointment.
+IDENTIFIER is the connection identifier.  ITEM-IDENTIFIER is an
+opaque item identifier.  CALLBACK is a callback function called
+with two arguments, IDENTIFIER, the connection identifier for the
+responding connection, and RESPONSE, the server's response to the
+appointment deletion."
+  (exco-operate identifier
+  		"DeleteItem"
+  		`(((DeleteType . "MoveToDeletedItems")
+  		   (SendMeetingCancellations . "SendToAllAndSaveCopy")
+  		   (ItemIds ,item-identifier))
+  		  nil nil nil)
+  		callback))
 
 (defun exco-calendar-item-get-details (identifier item-identifier process-item)
   "Query server for details about ITEM-IDENTIFIER.
@@ -689,6 +856,45 @@ argument ICALENDAR-TEXT."
 						  mime-path response)))
 					   coding-system))))))
 
+;; The organizer email address is in some cases returned in the
+;; server's internal "EX" format which is very long and unfamiliar.
+;; If necessary resolve it to the "SMTP" format.  This is done
+;; synchronously, for simplicity.
+(defun exco-resolve-organizer-email-address-synchronously (identifier
+							   organizer-structure)
+  "Return the organizer's SMTP email address as a string.
+IDENTIFIER is the connection identifier to use to resolve
+ORGANIZER-STRUCTURE to the returned value.  ORGANIZER-STRUCTURE
+should be treated as opaque.  If the address is not already an
+SMTP address, then this function queries the server synchronously
+to resolve the SMTP address.  It times out and returns nil if the
+server does not respond in under `exco--server-timeout' seconds."
+  (let* ((wrapped (list (list organizer-structure)))
+	 (routing-type
+	  (exco-extract-value '(Organizer Mailbox RoutingType) wrapped))
+	 (email-address
+	  (exco-extract-value '(Organizer Mailbox EmailAddress) wrapped)))
+    (cond
+     ((equal routing-type "EX")
+      (exco-extract-value
+       '(ResponseMessages
+	 ResolveNamesResponseMessage
+	 ResolutionSet
+	 Resolution
+	 Mailbox
+	 EmailAddress)
+       (with-timeout
+	   (exco--server-timeout
+	    (progn
+	      (message (concat "exco-organizer-smtp-email-address:"
+			       " Server did not respond in time"))
+	      nil))
+	 (exco-operate-synchronously identifier
+				     "ResolveNames"
+				     `(((UnresolvedEntry . ,email-address))
+				       nil nil nil)))))
+     ((equal routing-type "SMTP") email-address))))
+
 (defmacro exco--calendar-item-dolist (item items &rest forms)
   "Iterate through ITEMS.
 On each iteration, ITEM is set, and FORMS are run."
@@ -711,7 +917,8 @@ On each iteration, ITEM is set, and FORMS are run."
 	    (optional-invitees (when cc-invitees
 				 (mapcar 'org-trim
 					 (split-string cc-invitees ";"))))
-	    (item-identifier (assoc 'ItemId ,item)))
+	    (item-identifier (assoc 'ItemId ,item))
+	    (organizer-structure (assoc 'Organizer ,item)))
        ,@forms)))
 
 (defun exco-calendar-item-with-details-iterate (identifier
@@ -756,28 +963,51 @@ processing is done."
 		   location main-invitees optional-invitees
 		   icalendar-text)))))))
 
-(defun exco-calendar-item-iterate (response callback)
+(defmacro exco-calendar-item-iterate-general (response
+					      callback &rest care-abouts)
   "Iterate through calendar items in RESPONSE, calling CALLBACK on each.
-Returns a list of results from callback.  CALLBACK takes arguments:
+Return a list of results from callback.  CARE-ABOUTS is a list of
+symbols representing the arguments with which CALLBACK should be
+called.  Options are:
 SUBJECT, a string, the subject of the meeting.
 START, the start date and time in Emacs internal representation.
 END, the start date and time in Emacs internal representation.
 LOCATION, the location of the meeting.
-MAIN-INVITEES, a list of strings representing required participants.
-OPTIONAL-INVITEES, a list of strings representing optional participants."
-  (let ((result-list '()))
-    (exco--calendar-item-dolist
-     calendar-item (exco-extract-value '(ResponseMessages
-					 FindItemResponseMessage
-					 RootFolder
-					 Items)
-				       response)
-     ;; Silence byte compiler unused warning.
-     item-identifier
-     (push (funcall callback subject start-internal end-internal
-		    location main-invitees optional-invitees)
-	   result-list))
-    (nreverse result-list)))
+MAIN-INVITEES, a list of strings, email addresses of the required
+participants.
+OPTIONAL-INVITEES, a list of strings, email addresses of optional
+participants.
+ITEM-IDENTIFIER, a structure representing the calendar item.  It
+should be treated as opaque.
+ORGANIZER-STRUCTURE, a structure representing the organizer of
+the meeting.  It should be treated as opaque and resolved with
+`exco-organizer-smtp-email-address'."
+  `(let ((result-list '()))
+     (exco--calendar-item-dolist
+      calendar-item (exco-extract-value '(ResponseMessages
+					  FindItemResponseMessage
+					  RootFolder
+					  Items)
+					,response)
+      (push (funcall ,callback ,@care-abouts)
+	    result-list))
+     (nreverse result-list)))
+
+(defun exco-calendar-item-iterate (response callback)
+  "Iterate through calendar items in RESPONSE, calling CALLBACK on each.
+Return a list of results from callback.  CALLBACK takes arguments:
+SUBJECT, a string, the subject of the meeting.
+START, the start date and time in Emacs internal representation.
+END, the start date and time in Emacs internal representation.
+LOCATION, the location of the meeting.
+MAIN-INVITEES, a list of strings, email addresses of the required
+participants.
+OPTIONAL-INVITEES, a list of strings, email addresses of optional
+participants."
+  (exco-calendar-item-iterate-general
+   response callback
+   subject start-internal end-internal
+   location main-invitees optional-invitees))
 
 ;; Date-time utility functions.
 (defun exco-extend-timezone (date-time-string)
@@ -831,13 +1061,7 @@ arguments, IDENTIFIER and the server's response."
 	(ParentFolderIds
 	 (DistinguishedFolderId (Id . "calendar"))))
        ;; Empty arguments.
-       ,@(let* ((wsdl (exco--with-fsm identifier
-				      (plist-get (fsm-get-state-data fsm)
-						 :service-wsdl)))
-		(arity (soap-operation-arity wsdl
-					    "ExchangeServicePort"
-					    "FindItem")))
-	   (make-list (- arity 1) nil)))
+       ,@(cdr (exco-operation-arity-nils identifier "FindItem")))
      callback)))
 
 (defun exco-connection-iterate (initialize-function

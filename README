@@ -1,5 +1,25 @@
 Excorporate provides Exchange integration for Emacs.
 
+Most Recent Improvements
+------------------------
+
+New in Excorporate 0.9.1, released 2020-10-05:
+
+** Change default behaviour of decline, accept and tenatitvely-accept functions
+
+Always prompt for a response message in
+exco-org-decline-meeting-request, exco-org-accept-meeting-request, and
+exco-org-tentatively-accept-meeting-request, unless a prefix argument
+is specified.
+
+** Allow force-deleting calendar items
+
+Take a prefix argument to exco-org-delete-appointment to force-delete
+the calendar item at point in the *Excorporate* Org buffer.
+
+Quick Start
+-----------
+
 To create a connection to a web service:
 
 M-x excorporate

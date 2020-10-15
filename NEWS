@@ -1,5 +1,35 @@
 GNU Emacs Excorporate NEWS -- history of user-visible changes.
 
+* Excorporate 0.9.1
+
+Released 2020-10-05
+
+** Change default behaviour of decline, accept and tenatitvely-accept functions
+
+Always prompt for a response message in
+exco-org-decline-meeting-request, exco-org-accept-meeting-request, and
+exco-org-tentatively-accept-meeting-request, unless a prefix argument
+is specified.
+
+** Allow force-deleting calendar items
+
+Take a prefix argument to exco-org-delete-appointment to force-delete
+the calendar item at point in the *Excorporate* Org buffer.
+
+* Excorporate 0.9.0
+
+Released 2020-09-30
+
+** Add interactive exco-org meeting and appointment cancellation functions
+
+** Add interactive exco-org meeting reply functions
+
+** Add meeting and appointment creation functions
+
+** Add meeting organizer to Org entries
+
+** Add API Usage section to the manual, with several examples
+
 * Excorporate 0.8.3
 
 Released 2019-06-18
