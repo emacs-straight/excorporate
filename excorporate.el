@@ -1,11 +1,11 @@
 ;;; excorporate.el --- Exchange Web Services (EWS) integration -*- lexical-binding: t -*-
 
-;; Copyright (C) 2014-2020 Free Software Foundation, Inc.
+;; Copyright (C) 2014-2021 Free Software Foundation, Inc.
 
 ;; Author: Thomas Fitzsimmons <fitzsim@fitzsim.org>
 ;; Maintainer: Thomas Fitzsimmons <fitzsim@fitzsim.org>
 ;; Created: 2014-09-19
-;; Version: 0.9.2
+;; Version: 0.9.3
 ;; Keywords: calendar
 ;; Homepage: https://www.fitzsim.org/blog/
 ;; Package-Requires: ((emacs "24.1") (fsm "0.2.1") (soap-client "3.2.0") (url-http-ntlm "2.0.4") (nadvice "0.3"))
@@ -109,6 +109,9 @@
 ;; Collin Day <dcday137@gmail.com> tested and helped debug accessing
 ;; Office 365 through an HTTPS proxy.
 
+;; Sandro Romanzetti <roman.sandro@gmail.com> tested
+;; excorporate-update-diary.
+
 ;;; Code:
 
 ;; Implementation-visible functions and variables.
@@ -119,6 +122,26 @@
 (require 'fsm)
 (require 'excorporate-calendar)
 (require 'org)
+
+(defgroup excorporate nil
+  "Exchange support."
+  :version "25.1"
+  :group 'comm
+  :group 'calendar)
+
+(defcustom excorporate-update-diary t
+  "If non-nil, Excorporate will add entries to Emacs's diary.
+See also `org-agenda-include-diary' to include retrieved entries
+in Org's agenda view.
+
+`excorporate-update-diary' affects the behavior of `excorporate'
+just after a server connection is established.  Changes to this
+variable do not take effect unless `excorporate' is re-run.  If
+one wants to disable or enable Excorporate diary support
+dynamically, without re-running `excorporate', one can call the
+interactive functions, `excorporate-diary-disable' and
+`excorporate-diary-enable'."
+  :type 'boolean)
 
 ;; For Office 365, URLs containing autodiscover-s.outlook.com do not
 ;; seem to work properly (the returned XML gives ErrorCode 600).
@@ -353,7 +376,7 @@ the FSM should transition to on success."
 		      (unwind-protect
 			  (progn
 			    (url-debug 'excorporate
-			     "Processing status: %s" status)
+				       "Processing status: %s" status)
 			    (if (eq (car status) :error)
 				(progn
 				  (if (and
@@ -559,7 +582,10 @@ the FSM should transition to on success."
     (plist-put state-data :server-version (exco--get-server-version wsdl))
     (fsm-debug-output "exco--fsm %s server version is %s"
 		      identifier (exco-server-version identifier))
-    (message "Excorporate: Connection %S is ready" identifier))
+    (message "Excorporate: Connection %S is ready" identifier)
+    (if excorporate-update-diary
+	(excorporate-diary-enable)
+      (excorporate-diary-disable)))
   (list state-data nil))
 
 (define-state exco--fsm :retrieving-data
@@ -1112,15 +1138,6 @@ callback needs to make a recursive asynchronous call."
 	       wrapped-callback))))
 
 ;; User-visible functions and variables.
-(defgroup excorporate nil
-  "Exchange support."
-  :version "25.1"
-  :group 'comm
-  :group 'calendar)
-
-;; Name the excorporate-configuration variable vaguely.  It is currently a
-;; MAIL-ADDRESS string, a pair (MAIL-ADDRESS . SERVICE-URL), or nil.  In the
-;; future it could allow a list of strings and pairs.
 (defcustom excorporate-configuration nil
   "Excorporate configuration.
 

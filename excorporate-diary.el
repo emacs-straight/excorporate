@@ -1,6 +1,6 @@
 ;;; excorporate-diary.el --- Diary integration        -*- lexical-binding: t -*-
 
-;; Copyright (C) 2018-2019 Free Software Foundation, Inc.
+;; Copyright (C) 2018-2021 Free Software Foundation, Inc.
 
 ;; Author: Thomas Fitzsimmons <fitzsim@fitzsim.org>
 ;; Keywords: calendar
@@ -297,6 +297,7 @@ ARGUMENTS are the arguments to `diary-view-entries'."
   (appt-activate 1)
   (message "Excorporate diary support enabled."))
 
+;;;###autoload
 (defun excorporate-diary-disable ()
   "Disable Excorporate diary support."
   (interactive)
