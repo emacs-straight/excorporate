@@ -5,7 +5,7 @@
 ;; Author: Thomas Fitzsimmons <fitzsim@fitzsim.org>
 ;; Maintainer: Thomas Fitzsimmons <fitzsim@fitzsim.org>
 ;; Created: 2014-09-19
-;; Version: 0.9.3
+;; Version: 0.9.5
 ;; Keywords: calendar
 ;; Homepage: https://www.fitzsim.org/blog/
 ;; Package-Requires: ((emacs "24.1") (fsm "0.2.1") (soap-client "3.2.0") (url-http-ntlm "2.0.4") (nadvice "0.3"))
@@ -139,18 +139,6 @@ dynamically, without re-running `excorporate', one can call the
 interactive functions, `excorporate-diary-disable' and
 `excorporate-diary-enable'."
   :type 'boolean)
-
-(defcustom excorporate-time-zone nil
-  "The server-style time zone.
-If this variable is nil, Excorporate will compute a time zone
-automatically based on `current-time-zone'.  If that doesn't
-work, or you want to specify the time zone directly, run
-`excorporate-customize-time-zone' to customize this variable from
-a list of valid values."
-  :type '(choice :menu-tag "Server-style time zone"
-		 :tag "Server-style time zone"
-		 (const :tag "Compute from Emacs time zone" nil)
-		 string))
 
 ;; For Office 365, URLs containing autodiscover-s.outlook.com do not
 ;; seem to work properly (the returned XML gives ErrorCode 600).
@@ -673,6 +661,28 @@ use the `cdr' of the pair as the service URL."
 	(fsm-send fsm :retrieve-xml))
       nil)))
 
+(defun exco-select-connection-identifier ()
+  "Return a connection identifier.
+Return the sole connection if only one exists, or prompt the user
+if more than one connection exists.  Return nil if the user
+provides a null response"
+  (exco--ensure-connection)
+  (if (= (length exco--connection-identifiers) 1)
+      (car exco--connection-identifiers)
+    (let* ((strings (mapcar (lambda (object)
+			      (format "%s" object))
+			    exco--connection-identifiers))
+	   (value (completing-read "Excorporate connection: "
+				   strings nil t)))
+      (unless (equal value "")
+	(let ((position (catch 'index
+			  (let ((index 0))
+			    (dolist (string strings)
+			      (when (equal value string)
+				(throw 'index index))
+			      (setq index (1+ index)))))))
+	  (nth position exco--connection-identifiers))))))
+
 (defun exco-operate (identifier name arguments callback)
   "Execute a service operation asynchronously.
 IDENTIFIER is the connection identifier.  Execute operation NAME
@@ -975,6 +985,10 @@ On each iteration, ITEM is set, and FORMS are run."
 					 (split-string cc-invitees ";"))))
 	    (item-identifier (assoc 'ItemId ,item))
 	    (organizer-structure (assoc 'Organizer ,item)))
+       ;; Silence byte compiler if any of these are unused.
+       (ignore subject start start-internal end end-internal location
+	       to-invitees main-invitees cc-invitees optional-invitees
+	       item-identifier organizer-structure)
        ,@forms)))
 
 (defun exco-calendar-item-with-details-iterate (identifier
@@ -1254,42 +1268,12 @@ ARGUMENT is the prefix argument."
    (t
     (error "Excorporate: Invalid configuration"))))
 
-(defun excorporate-customize-time-zone ()
-  "Prompt for a server-style time zone from a list of valid values."
-  (interactive)
-  (let ((zone (completing-read
-	       "Excorporate time zone: "
-	       (cons "Emacs Built-in"
-		     (hash-table-values exco--time-zone-olson-to-server))
-	       nil t)))
-    (unless (equal zone "")
-      (customize-save-variable 'excorporate-time-zone
-			       (if (equal zone "Emacs Built-in") nil zone)))))
-
 (defun excorporate-disconnect ()
   "Disconnect a server connection."
   (interactive)
-  (catch 'cancel
-    (let ((identifier
-	   (cond
-	    ((= (length exco--connection-identifiers) 0)
-	     (exco--ensure-connection))
-	    ((= (length exco--connection-identifiers) 1)
-	     (car exco--connection-identifiers))
-	    (t
-	     (let* ((strings (mapcar (lambda (object)
-				       (format "%s" object))
-				     exco--connection-identifiers))
-		    (value (completing-read "Excorporate: Disconnect: "
-					    strings nil t))
-		    (return (when (equal value "") (throw 'cancel nil)))
-		    (position (catch 'index
-				(let ((index 0))
-				  (dolist (string strings)
-				    (when (equal value string)
-				      (throw 'index index))
-				    (setq index (1+ index))))) ))
-	       (nth position exco--connection-identifiers))))))
+  (exco--ensure-connection)
+  (let ((identifier (exco-select-connection-identifier)))
+    (when identifier
       (exco-disconnect identifier)
       (message "Excorporate: Disconnected %s" identifier))))
 
