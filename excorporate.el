@@ -5,7 +5,7 @@
 ;; Author: Thomas Fitzsimmons <fitzsim@fitzsim.org>
 ;; Maintainer: Thomas Fitzsimmons <fitzsim@fitzsim.org>
 ;; Created: 2014-09-19
-;; Version: 1.1.0
+;; Version: 1.1.1
 ;; Keywords: calendar
 ;; Homepage: https://www.fitzsim.org/blog/
 ;; Package-Requires: ((emacs "24.1") (cl-lib "0.6.1") (fsm "0.2.1") (soap-client "3.2.0") (url-http-ntlm "2.0.4") (nadvice "0.3") (url-http-oauth "0.8.3"))
@@ -1236,12 +1236,12 @@ the \"mail address\", and the EWS URL as the \"service URL\"."
 	       ("authorization-endpoint"
 		(string :tag "Authorization URL"
 			,(concat "https://login.microsoftonline.com"
-				 "/ecdd899a-33be-4c33-91e4-1f1144fc2f56"
+				 "/YOUR_TENANT_IDENTIFIER"
 				 "/oauth2/authorize")))
 	       ("access-token-endpoint"
 		(string :tag "Access-token URL"
 			,(concat "https://login.microsoftonline.com"
-				 "/ecdd899a-33be-4c33-91e4-1f1144fc2f56"
+				 "/YOUR_TENANT_IDENTIFIER"
 				 "/oauth2/token")))
 	       ("client-identifier"
 		(string :tag "Client identifier"
@@ -1289,7 +1289,7 @@ the \"mail address\", and the EWS URL as the \"service URL\"."
 				 ("login_hint"
 				  (string
 				   :value
-				   "change-this-to-your-EWS-email-address"))
+				   "YOUR_EMAIL_ADDRESS"))
 				 ("prompt"
 				  (string :value "login"))
 				 ("redirect_uri"
